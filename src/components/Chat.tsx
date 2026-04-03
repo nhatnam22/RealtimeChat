@@ -59,7 +59,7 @@ const Chat: React.FC<ChatProps> = ({ username, token, onLogout }) => {
         const client = new Client({
             webSocketFactory: () => new SockJS(`${API_BASE_URL}/ws`),
             connectHeaders: {
-                Authorization: `Bearer ${token}`
+                token: token
             },
             reconnectDelay: 5000,
             debug: (str) => {
