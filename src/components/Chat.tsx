@@ -13,8 +13,8 @@ interface ChatMessage {
     sender: string;
     recipient?: string;
     groupId?: string;
-    content: string;
-    type: 'CHAT' | 'TYPING' | 'JOIN' | 'LEAVE';
+    content?: string;
+    type?: 'CHAT' | 'TYPING' | 'JOIN' | 'LEAVE' | 'READ_RECEIPT';
 }
 
 const API_BASE_URL = 'http://localhost:8080';
@@ -25,16 +25,18 @@ const Chat: React.FC<ChatProps> = ({ username, token, onLogout }) => {
     const [activeChat, setActiveChat] = useState<string | null>(null);
     const [messageInput, setMessageInput] = useState<string>('');
     const [typingStatus, setTypingStatus] = useState<Record<string, boolean>>({});
+    const [readReceipts, setReadReceipts] = useState<Record<string, boolean>>({});
     
     const clientRef = useRef<Client | null>(null);
     const typingTimeoutRef = useRef<Record<string, NodeJS.Timeout>>({});
     const emitTypingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const readThrottleRef = useRef<NodeJS.Timeout | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
     // Scroll to bottom when messages change
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messagesMap, activeChat, typingStatus]);
+    }, [messagesMap, activeChat, typingStatus, readReceipts]);
 
     useEffect(() => {
         // 1. Fetch online users
@@ -93,6 +95,8 @@ const Chat: React.FC<ChatProps> = ({ username, token, onLogout }) => {
                             const existing = prev[chatWith] || [];
                             return { ...prev, [chatWith]: [...existing, msg] };
                         });
+                        
+                        // Nếu đang mở chat với người gửi, đánh dấu là đã đọc (hoặc trigger onScroll sẽ làm việc này)
                     } else if (msg.type === 'TYPING') {
                         // Handle receiving typing indicator
                         const sender = msg.sender;
@@ -106,6 +110,8 @@ const Chat: React.FC<ChatProps> = ({ username, token, onLogout }) => {
                         typingTimeoutRef.current[sender] = setTimeout(() => {
                             setTypingStatus(prev => ({ ...prev, [sender]: false }));
                         }, 3000);
+                    } else if (msg.type === 'READ_RECEIPT') {
+                        setReadReceipts(prev => ({ ...prev, [msg.sender]: true }));
                     }
                 });
             },
@@ -125,8 +131,45 @@ const Chat: React.FC<ChatProps> = ({ username, token, onLogout }) => {
             // Clear any pending timeouts
             Object.values(typingTimeoutRef.current).forEach(clearTimeout);
             if (emitTypingTimeoutRef.current) clearTimeout(emitTypingTimeoutRef.current);
+            if (readThrottleRef.current) clearTimeout(readThrottleRef.current);
         };
     }, [token, username]);
+
+    // Handle Enter/Leave Room
+    useEffect(() => {
+        if (!activeChat || !clientRef.current) return;
+
+        // Enter room
+        clientRef.current.publish({
+            destination: '/app/chat.enterRoom',
+            body: JSON.stringify({ sender: username, recipient: activeChat })
+        });
+
+        return () => {
+            // Leave room
+            if (clientRef.current) {
+                clientRef.current.publish({
+                    destination: '/app/chat.leaveRoom',
+                    body: JSON.stringify({ sender: username })
+                });
+            }
+        };
+    }, [activeChat, username]);
+
+    const handleMessagesScroll = () => {
+        if (!activeChat || !clientRef.current) return;
+        
+        if (!readThrottleRef.current) {
+            clientRef.current.publish({
+                destination: '/app/chat.read',
+                body: JSON.stringify({ sender: username, recipient: activeChat })
+            });
+
+            readThrottleRef.current = setTimeout(() => {
+                readThrottleRef.current = null;
+            }, 2000);
+        }
+    };
 
     const handleSendMessage = () => {
         if (!activeChat || !messageInput.trim() || !clientRef.current) return;
@@ -150,6 +193,7 @@ const Chat: React.FC<ChatProps> = ({ username, token, onLogout }) => {
             return { ...prev, [activeChat]: [...existing, chatMessage] };
         });
 
+        setReadReceipts(prev => ({ ...prev, [activeChat]: false }));
         setMessageInput('');
     };
 
@@ -163,7 +207,6 @@ const Chat: React.FC<ChatProps> = ({ username, token, onLogout }) => {
             const typingMsg: ChatMessage = {
                 sender: username,
                 recipient: activeChat,
-                content: '',
                 type: 'TYPING'
             };
             
@@ -224,15 +267,29 @@ const Chat: React.FC<ChatProps> = ({ username, token, onLogout }) => {
                             <div className="w-2 h-2 bg-green-500 rounded-full"></div>
                         </div>
 
-                        <div className="flex-1 p-6 overflow-y-auto bg-gray-50">
+                        <div className="flex-1 p-6 overflow-y-auto bg-gray-50" onScroll={handleMessagesScroll}>
                             {(messagesMap[activeChat] || []).map((msg, idx) => (
                                 <Message
                                     key={idx}
                                     sender={msg.sender}
-                                    content={msg.content}
+                                    content={msg.content || ''}
                                     isOwnMessage={msg.sender === username}
                                 />
                             ))}
+                            {(() => {
+                                const msgs = messagesMap[activeChat] || [];
+                                if (msgs.length > 0) {
+                                    const lastMsg = msgs[msgs.length - 1];
+                                    if (lastMsg.sender === username && readReceipts[activeChat]) {
+                                        return (
+                                            <div className="text-xs text-right text-gray-500 mr-2 mt-1">
+                                                Đã xem
+                                            </div>
+                                        );
+                                    }
+                                }
+                                return null;
+                            })()}
                             {typingStatus[activeChat] && (
                                 <div className="text-sm text-gray-500 italic ml-2 animate-pulse">
                                     {activeChat} đang gõ...
